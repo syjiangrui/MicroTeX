@@ -1,0 +1,47 @@
+# platform/cg/microtex-cgConfig.cmake.in
+
+@PACKAGE_INIT@
+
+# Find dependencies that microtex-cg requires
+include(CMakeFindDependencyMacro)
+
+# 1. Core microtex library dependency
+find_dependency(microtex @microtex_VERSION@ REQUIRED) # Use version from project()
+
+# 2. System framework dependencies (iOS)
+# CMake doesn't have built-in find_dependency for system frameworks easily,
+# but we can ensure they are found again by the consumer project using find_library.
+# Or rely on the fact that any iOS project will have them available.
+# For robustness, let's try finding them. This might only work if the consumer
+# project is also configured for iOS with same toolchain.
+find_package(Threads REQUIRED) # Often implicitly required by Foundation/UIKit
+
+macro(find_ios_framework _framework_name)
+    find_library(${_framework_name}_FRAMEWORK ${_framework_name})
+    if(NOT ${_framework_name}_FRAMEWORK)
+        set(microtex-cg_FOUND FALSE)
+        set(microtex-cg_NOT_FOUND_MESSAGE "Could not find required iOS framework: ${_framework_name}")
+    endif()
+endmacro()
+
+if(CMAKE_SYSTEM_NAME MATCHES "iOS")
+    find_ios_framework(Foundation)
+    find_ios_framework(CoreGraphics)
+    find_ios_framework(CoreText)
+    find_ios_framework(UIKit)
+else()
+    message(WARNING "microtex-cg requires an iOS target. Framework check skipped.")
+    # Do not fail here, allow using the target if user handles framework linking manually
+endif()
+
+# Include the targets file generated during build/install
+# This defines the actual `microtex::microtex-cg` imported target
+if(NOT TARGET microtex::microtex-cg) # Check if target isn't already defined
+    include("${CMAKE_CURRENT_LIST_DIR}/microtex-cgTargets.cmake")
+endif()
+
+# Get properties from the imported target (optional, for checks)
+# get_target_property(MICROTEX_CG_INCLUDE_DIRS microtex::microtex-cg INTERFACE_INCLUDE_DIRECTORIES)
+
+# Check if required variables/targets are set (optional, sanity check)
+check_required_components(microtex-cg)
