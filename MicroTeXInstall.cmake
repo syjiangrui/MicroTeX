@@ -17,6 +17,7 @@ function(MICROTEX_INSTALL_TARGET TARGET)
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin
+        FRAMEWORK DESTINATION lib
     )
     include(CMakePackageConfigHelpers)
     write_basic_package_version_file(

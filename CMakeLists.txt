@@ -64,9 +64,9 @@ option(BUILD_SHARED_LIBS "Build shared libraries (.so/.dll/.dylib) instead of st
 option(BUILD_STATIC "Build static libraries (.a/.lib)" OFF) # Alternative way to control static builds
 
 # Logic for BUILD_STATIC overriding BUILD_SHARED_LIBS if both used
-if(BUILD_STATIC)
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
-endif()
+if (BUILD_STATIC)
+    set(_BUILD_STATIC ON)
+endif ()
 
 # --- Installation Helper ---
 include(MicroTeXInstall.cmake) # Assumed to exist
