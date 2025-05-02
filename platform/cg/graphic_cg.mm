@@ -18,8 +18,8 @@
 #include <cmath> // For M_PI
 #include <iostream> // For error logging
 
-#define _log(...)  {}
-#define _logv(...)  {}
+#define _log(...)  printf(__VA_ARGS__)
+#define _logv(...)  printf(__VA_ARGS__)
 
 // Helper to convert microtex color to CGColorRef
 // IMPORTANT: The caller must release the returned CGColorRef when done!
@@ -257,10 +257,13 @@ void TextLayout_cg::getBounds(Rect& bounds) {
     bounds = _bounds;
 }
 
+// Located within the TextLayout_cg implementation in graphic_cg.mm
+
 void TextLayout_cg::draw(Graphics2D& g2, float x, float y) {
+    printf("TextLayout_cg::draw called with x: %f, y: %f\n", x, y);
     if (!_ctLine) return;
 
-    // Downcast to our CG implementation
+    // Downcast to our CG implementation to get the context
     Graphics2D_cg& g = static_cast<Graphics2D_cg&>(g2);
     CGContextRef ctx = g.getCGContext();
     if (!ctx) return;
@@ -268,21 +271,39 @@ void TextLayout_cg::draw(Graphics2D& g2, float x, float y) {
     // Save graphics state before drawing text
     CGContextSaveGState(ctx);
 
-    // Core Graphics Y-axis is typically flipped compared to CT/Skia baseline origin.
-    // We need to adjust the drawing position based on the context's CTM.
-    // Assuming context is standard UIKit (Y=0 at top):
-    // baseline = y
-    // CTLineDraw expects position = bottom-left of the line's origin (baseline start)
-    CGContextSetTextPosition(ctx, x, y);
+    // --- Apply local transformation for CTLineDraw ---
 
-    // Set the fill color from the graphics context
-    // We assume the Graphics2D_cg has already set the correct CGFillColor.
-    // If not, we'd apply it here: CGContextSetFillColorWithColor(ctx, g.getCurrentCGColor());
+    // 1. Translate to the desired baseline origin (x, y)
+    //    These coordinates are provided by the caller (TeXRender::draw)
+    //    and are assumed to be correct within the current context CTM (Y-down).
+    CGContextTranslateCTM(ctx, x, y);
 
-    // Draw the line
+    // 2. Scale to flip the Y-axis locally *around the baseline*
+    //    This makes Y increase upwards locally for CTLineDraw.
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+
+    // 3. Set the text matrix to identity. Crucial!
+    //    Ensures CTLineDraw uses the main CTM for glyph positioning,
+    //    not some other text-specific matrix.
+    CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+
+    // 4. Set the text *drawing* position to (0,0) relative to the
+    //    NEWLY TRANSFORMED origin (which is our flipped baseline).
+    CGContextSetTextPosition(ctx, 0, 0);
+
+    // 5. Ensure the fill color is set on the context.
+    //    (Assuming g.setColor() already configured the context's fill color)
+    //    Example: CGContextSetFillColorWithColor(ctx, g.getCurrentCGColor());
+    //    Make sure Graphics2D_cg keeps track of the current CGColorRef or
+    //    applies it to the context in its setColor method.
+
+    // 6. Draw the line using Core Text.
+    //    CTLineDraw will now render glyphs upwards from (0,0) in the
+    //    locally flipped coordinate space, appearing correctly oriented.
     CTLineDraw(_ctLine, ctx);
 
-    // Restore graphics state
+    // --- Restore the original graphics state ---
+    // This removes the local translation and scale, reverting the CTM.
     CGContextRestoreGState(ctx);
 }
 
@@ -515,14 +536,22 @@ float Graphics2D_cg::sy() const {
      return _sy; // Return tracked scale factor
 }
 
+// Located within the Graphics2D_cg implementation in graphic_cg.mm
+
 void Graphics2D_cg::drawGlyph(u16 glyph, float x, float y) {
+    // Optional: Keep this log for debugging which path is taken
+    printf("Graphics2D_cg::drawGlyph called with glyph: %u, x: %f, y: %f\n", glyph, x, y);
+
     if (!_context || !_font || !_font->getCTFont() || _fontSize <= 0) {
         _log("Warning: Cannot draw glyph. Missing context, font, or valid size.\n");
         return;
     }
 
+    // 1. Get the base CTFont and create a sized instance
+    //    (Important to handle font size changes)
     CTFontRef baseFont = _font->getCTFont();
-    // Create a new CTFont instance with the correct size
+    // Create attributes dictionary (optional, can be NULL if no extra attrs)
+    // CFDictionaryRef attributes = NULL;
     CTFontRef sizedFont = CTFontCreateCopyWithAttributes(baseFont, _fontSize, NULL, NULL);
     if (!sizedFont) {
         _log("Warning: Could not create sized font for glyph drawing.\n");
@@ -530,18 +559,42 @@ void Graphics2D_cg::drawGlyph(u16 glyph, float x, float y) {
     }
 
     CGGlyph cgGlyph = static_cast<CGGlyph>(glyph); // Assume u16 is directly the CGGlyph ID
-    CGPoint position = CGPointMake(x, y);
 
-    // Save state, set fill color, draw, restore state
-    CGContextSaveGState(_context);
-    applyFillColor(); // Ensure correct fill color is set
+    // --- Apply local transformation for Glyph Drawing ---
+    CGContextSaveGState(_context); // Save the current graphics state
 
-    // Use CTFontDrawGlyphs for easier handling of font metrics & positioning
-    CTFontDrawGlyphs(sizedFont, &cgGlyph, &position, 1, _context);
+    // 2. Translate to the desired glyph origin (x, y)
+    //    These coordinates are provided by the caller (MicroTeX layout engine)
+    //    and are assumed to be correct within the current context CTM (Y-down).
+    CGContextTranslateCTM(_context, x, y);
 
+    // 3. Scale to flip the Y-axis locally *around the origin (x,y)*
+    //    This makes Y increase upwards locally for Core Text drawing.
+    CGContextScaleCTM(_context, 1.0, -1.0);
+
+    // 4. Set the text matrix to identity. Good practice before text/glyph drawing.
+    CGContextSetTextMatrix(_context, CGAffineTransformIdentity);
+
+    // 5. Prepare the glyph position for CTFontDrawGlyphs.
+    //    Since we've already translated and scaled the CTM,
+    //    we want to draw the glyph at (0,0) within this *new*,
+    //    locally-flipped coordinate system established at (x,y).
+    CGPoint drawPosition = CGPointMake(0, 0);
+
+    // 6. Ensure the fill color is set on the context.
+    applyFillColor(); // Assuming this helper sets the CGContext's fill color
+
+    // 7. Draw the glyph using Core Text.
+    //    It will be drawn relative to the modified CTM origin (0,0),
+    //    appearing correctly oriented at the original (x,y) position.
+    CTFontDrawGlyphs(sizedFont, &cgGlyph, &drawPosition, 1, _context);
+
+    // 8. Restore the original graphics state
+    //    Removes the local translation and scale, reverts the CTM.
     CGContextRestoreGState(_context);
 
-    CFRelease(sizedFont); // Release the sized font instance
+    // 9. Release the sized font instance we created
+    CFRelease(sizedFont);
 }
 
 // Path operations
