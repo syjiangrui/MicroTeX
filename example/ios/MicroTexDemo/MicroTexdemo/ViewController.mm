@@ -13,6 +13,7 @@
 @interface ViewController ()
 
 @property (nonatomic, strong) LaTeXView *latexView;
+@property (nonatomic, strong) UIScrollView *scrollView;
 
 @end
 
@@ -20,6 +21,16 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.scrollView];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [self.scrollView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
+        [self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
+        [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor]
+    ]];
     
     NSString *clm = [[NSBundle mainBundle] pathForResource:@"latinmodern-math" ofType:@"clm2"];
     NSString *font = [[NSBundle mainBundle] pathForResource:@"latinmodern-math" ofType:@"otf"];
@@ -32,17 +43,20 @@
 
     NSLog(@"MicroTeX initialization successful.");
     
-    LaTeXView *latexView = [[LaTeXView alloc] initWithFrame:CGRectMake(0, 100, self.view.bounds.size.width * 2, 700)];
-//    latexView.latexString = @"E = mc^2 + \\frac{\\alpha}{\\beta}"; // Example LaTeX
+    LaTeXView *latexView = [[LaTeXView alloc] initWithFrame:CGRectZero];
     latexView.latexString = [self latexSource];
     latexView.latexFontSize = 18.0f;
     latexView.textColor = [UIColor blackColor];
-//    latexView.layer.borderColor = [UIColor lightGrayColor].CGColor; // For visualization
-//    latexView.layer.borderWidth = 1.0;
     latexView.backgroundColor = UIColor.whiteColor;
     
-    [self.view addSubview:latexView];
+    [self.scrollView addSubview:latexView];
     self.latexView = latexView;
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self.latexView sizeToFit];
+    self.scrollView.contentSize = self.latexView.bounds.size;
 }
 
 - (NSString *)latexSource {

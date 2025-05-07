@@ -539,9 +539,6 @@ float Graphics2D_cg::sy() const {
 // Located within the Graphics2D_cg implementation in graphic_cg.mm
 
 void Graphics2D_cg::drawGlyph(u16 glyph, float x, float y) {
-    // Optional: Keep this log for debugging which path is taken
-    printf("Graphics2D_cg::drawGlyph called with glyph: %u, x: %f, y: %f\n", glyph, x, y);
-
     if (!_context || !_font || !_font->getCTFont() || _fontSize <= 0) {
         _log("Warning: Cannot draw glyph. Missing context, font, or valid size.\n");
         return;

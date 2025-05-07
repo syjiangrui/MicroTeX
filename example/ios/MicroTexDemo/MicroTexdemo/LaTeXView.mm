@@ -1,111 +1,279 @@
 //
-//  LaTeXView.m
+//  LaTeXView.mm
 //  MicroTexdemo
 //
 //  Created by reikjiang on 2025/5/1.
 //
 
 #import "LaTeXView.h"
-// --- MicroTeX C++ Includes ---
-#include "microtex.h"
-#include "render/render.h"      // For TeXRender class
-#include "graphic/graphic_basic.h" // For microtex::color constants/conversion (if needed)
-#include "graphic_cg.h" // For the Graphics2D_cg wrapper
+#import <memory> // For std::unique_ptr
+#import <stdexcept>
 
-@implementation LaTeXView
+// MicroTeX Headers
+#import "microtex.h"
+#import "render/render.h"
+#import "graphic/graphic_basic.h"
+#import "graphic_cg.h"
 
-// The core drawing method
-- (void)drawRect:(CGRect)rect {
-    [super drawRect:rect];
+// Default values
+static const CGFloat kDefaultLatexFontSize = 17.0f;
+static const CGFloat kDefaultLineSpacing = 1.0f;
 
-    if (!self.latexString || self.latexString.length == 0) {
-        return;
+// Helper to convert UIColor to microtex::color
+static microtex::color microtexColorFromUIColor(UIColor *uiColor) {
+    CGFloat r, g, b, a;
+    // Ensure color is in RGB color space for getRed:green:blue:alpha:
+    UIColor *rgbColor = uiColor;
+    if (CGColorGetNumberOfComponents(uiColor.CGColor) == 2) { // Grayscale
+        CGFloat white, alpha;
+        if ([uiColor getWhite:&white alpha:&alpha]) {
+            rgbColor = [UIColor colorWithRed:white green:white blue:white alpha:alpha];
+        } else {
+            // Fallback or error handling if conversion fails
+            rgbColor = [UIColor blackColor]; // Or some other default
+        }
+    }
+    
+    [rgbColor getRed:&r green:&g blue:&b alpha:&a];
+    return microtex::argb(
+        static_cast<int>(a * 255),
+        static_cast<int>(r * 255),
+        static_cast<int>(g * 255),
+        static_cast<int>(b * 255)
+    );
+}
+
+@implementation LaTeXView {
+    // Declare renderInstance as a direct C++ instance variable
+    std::unique_ptr<microtex::Render> _renderInstance;
+}
+
+#pragma mark – Init / Dealloc
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        [self commonInit];
+    }
+    return self;
+}
+
+- (void)commonInit {
+    _latexFontSize = kDefaultLatexFontSize;
+    _lineSpacing   = kDefaultLineSpacing;
+    _textColor     = [UIColor blackColor];
+    _fillWidth     = YES;
+    self.backgroundColor = [UIColor clearColor];
+}
+
+#pragma mark – Property Setters
+
+- (void)handleRenderPropertyChanged {
+    _renderInstance.reset(); // Invalidate the current C++ render object
+    [self setNeedsDisplay];
+    [self invalidateIntrinsicContentSize];
+}
+
+- (void)setLatexString:(nullable NSString *)latexString {
+    // Ensure comparison handles nil correctly
+    if (!(_latexString == latexString || [_latexString isEqualToString:latexString])) {
+        _latexString = [latexString copy];
+        [self handleRenderPropertyChanged];
+    }
+}
+
+- (void)setLatexFontSize:(CGFloat)latexFontSize {
+    if (_latexFontSize != latexFontSize) {
+        _latexFontSize = latexFontSize;
+        [self handleRenderPropertyChanged];
+    }
+}
+
+- (void)setLineSpacing:(CGFloat)lineSpacing {
+    if (_lineSpacing != lineSpacing) {
+        _lineSpacing = lineSpacing;
+        [self handleRenderPropertyChanged];
+    }
+}
+
+- (void)setTextColor:(UIColor *)textColor {
+    if (![_textColor isEqual:textColor]) {
+        _textColor = textColor;
+        [self handleRenderPropertyChanged];
+    }
+}
+
+- (void)setFillWidth:(BOOL)fillWidth {
+    if (_fillWidth != fillWidth) {
+        _fillWidth = fillWidth;
+        [self handleRenderPropertyChanged];
+    }
+}
+
+#pragma mark – Render Management
+
+- (std::unique_ptr<microtex::Render>)createRenderObjectForWidth:(float)width useFillWidthFlag:(BOOL)useFillWidthFlag {
+    if (self.latexString.length == 0) {
+        return nullptr;
     }
 
-    CGContextRef cgContext = UIGraphicsGetCurrentContext();
-    if (!cgContext) {
-        NSLog(@"Error: Could not get graphics context in LaTeXView");
-        return;
+    const char *latexCString = [self.latexString UTF8String];
+    if (!latexCString) { // self.latexString might be empty or contain non-UTF8 compatible chars
+        NSLog(@"LaTeXView: Could not convert latexString to UTF8String: %@", self.latexString);
+        return nullptr;
     }
+    std::string latexStdString(latexCString);
+    microtex::color txColor = microtexColorFromUIColor(self.textColor);
+    microtex::Render* rawRender = nullptr;
 
-    // --- NO Coordinate System Flip ---
-    // CGContextSaveGState(cgContext); // Still save/restore if you do other CG drawing
-    // CGContextTranslateCTM(cgContext, 0, self.bounds.size.height);
-    // CGContextScaleCTM(cgContext, 1.0, -1.0);
-    // --- Assume MicroTeX works directly with UIKit's Y-down system ---
-
-    microtex::Render* render = nullptr;
+    // Determine the actual width to pass to MicroTeX.
+    // If useFillWidthFlag is true, and width > 0, MicroTeX uses it for wrapping.
+    // If width is 0, MicroTeX calculates natural width.
+    float effectiveParseWidth = useFillWidthFlag ? width : 0.0f;
 
     try {
-        // Pass the UNFLIPPED context to Graphics2D_cg
-        microtex::Graphics2D_cg g2(cgContext);
-
-        // Prepare parameters... (color, string, size, etc.)
-        CGFloat r, g, b, a;
-        [self.textColor getRed:&r green:&g blue:&b alpha:&a];
-        microtex::color texColor = microtex::argb(
-            static_cast<int>(a * 255), static_cast<int>(r * 255),
-            static_cast<int>(g * 255), static_cast<int>(b * 255)
-        );
-        std::string latexStdString = [self.latexString UTF8String];
-
-        // --- Adjust Render Width if Not Filling ---
-        // If fillWidth = false, use 0 or a large value for parse,
-        // then get the actual width from the render object.
-        bool fillWidth = true; // Set true to wrap to bounds, false for natural width
-        float parseWidth = fillWidth ? self.bounds.size.width : 0; // Use 0 for natural width measurement
-
-        float textSize = self.latexFontSize;
-        float lineSpace = 1.0f;
-
-        // --- Call the static parse method ---
-        render = microtex::MicroTeX::parse(
+        rawRender = microtex::MicroTeX::parse(
             latexStdString,
-                                           parseWidth,
-            textSize,
-            lineSpace,
-            texColor,
-            fillWidth
+            effectiveParseWidth,
+            self.latexFontSize,
+            self.lineSpacing,
+            txColor,
+            useFillWidthFlag // This flag might control internal logic like line breaking even if width is 0
         );
-
-        if (!render) {
-            NSLog(@"MicroTeX parsing failed for string: %@", self.latexString);
-            // CGContextRestoreGState(cgContext); // Only if you saved state earlier
-            return;
-        }
-
-        // --- Calculate Drawing Position (Y-Down) ---
-        float drawX = 0; // Align left edge horizontally
-        // float renderHeight = render->getHeight(); // Still useful info
-        // float renderWidth = render->getWidth(); // Get width if fillWidth was false
-
-        // --- FIX: Try drawing at Y=0 in the standard Y-down system ---
-        // This should place the first line's baseline (or top?) at the top edge.
-        float drawY = 0;
-
-        // Optional: Add top padding
-        // drawY += 5; // Move down 5 points
-
-        // --- Draw the render object ---
-        g2.setColor(texColor);
-        render->draw(g2, drawX, drawY); // Draw with coords in Y-down system
-
-        // --- Delete the render object ---
-        delete render;
-        render = nullptr;
-
-    } catch (const std::exception& e) {
-        NSLog(@"MicroTeX Rendering C++ exception: %s", e.what());
-        delete render;
-        render = nullptr;
+    } catch (const std::exception &ex) {
+        NSLog(@"MicroTeX parse exception: %s for LaTeX: %@", ex.what(), self.latexString);
     } catch (...) {
-        NSLog(@"MicroTeX Rendering unknown C++ exception.");
-        delete render;
-        render = nullptr;
+        NSLog(@"MicroTeX parse unknown exception for LaTeX: %@", self.latexString);
     }
 
-    // --- Restore the graphics state (only needed if you saved it) ---
-    // CGContextRestoreGState(cgContext);
+    if (!rawRender) {
+        // NSLog is good, but avoid flooding if it happens repeatedly for the same string.
+        // Consider more robust error reporting or a placeholder render.
+        NSLog(@"Failed to parse LaTeX: %@", self.latexString);
+    }
+    return std::unique_ptr<microtex::Render>(rawRender);
+}
+
+- (void)ensureRenderInstance {
+    if (!_renderInstance) {
+        float parseWidth = 0.0f;
+        if (self.fillWidth) {
+             // Only use bounds width if it's positive, otherwise, MicroTeX will use natural width.
+            if (CGRectGetWidth(self.bounds) > 0) {
+                parseWidth = CGRectGetWidth(self.bounds);
+            }
+        }
+        // Pass self.fillWidth as the flag to MicroTeX::parse
+        _renderInstance = [self createRenderObjectForWidth:parseWidth useFillWidthFlag:self.fillWidth];
+    }
+}
+
+#pragma mark – Drawing
+
+- (void)drawRect:(CGRect)rect {
+    [super drawRect:rect];
+    if (self.latexString.length == 0) {
+        return;
+    }
+
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) {
+        NSLog(@"LaTeXView: could not get CGContextRef");
+        return;
+    }
+
+    [self ensureRenderInstance];
+    if (!_renderInstance) {
+        // Optionally draw an error message or placeholder if parsing failed
+        return;
+    }
+
+    microtex::Graphics2D_cg g2(ctx);
+    g2.setColor(microtexColorFromUIColor(self.textColor)); // Set color on the graphics context
+
+    // Draw at the top-left of the view's bounds
+    _renderInstance->draw(g2, 0.0f, 0.0f);
+}
+
+#pragma mark – Sizing
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    if (self.latexString.length == 0) {
+        return CGSizeZero;
+    }
+
+    float measureWidth = 0.0f; // Default to natural width
+    BOOL useFillWidthForSizing = self.fillWidth;
+
+    if (self.fillWidth && size.width > 0 && size.width != CGFLOAT_MAX) {
+        measureWidth = size.width;
+    } else if (!self.fillWidth) {
+        // If not filling width, always measure natural width
+        useFillWidthForSizing = false;
+    }
+    // If self.fillWidth is true but no specific width is given (size.width is 0 or CGFLOAT_MAX),
+    // we still want to pass fillWidth=true to parse, but with measureWidth=0,
+    // to let MicroTeX potentially calculate a "natural wrapped width" if it supports such a concept,
+    // or just natural width. The key is `useFillWidthForSizing` informs the parsing call.
+
+    std::unique_ptr<microtex::Render> tempRender = [self createRenderObjectForWidth:measureWidth useFillWidthFlag:useFillWidthForSizing];
+
+    if (!tempRender) {
+        return CGSizeZero;
+    }
+    return CGSizeMake(ceilf(tempRender->getWidth()), ceilf(tempRender->getHeight()));
+}
+
+- (CGSize)intrinsicContentSize {
+    if (self.latexString.length == 0) {
+        // For an empty string, if you want it to have *some* size (e.g., height of one line of default font size)
+        // you could return that. For now, CGSizeZero is fine.
+        return CGSizeZero;
+    }
+    
+    float intrinsicMeasureWidth = 0.0f;
+    BOOL useFillWidthForIntrinsic = self.fillWidth;
+
+    if (self.fillWidth) {
+        // If fillWidth is true, the intrinsic width is technically "as wide as it's allowed to be".
+        // Auto Layout often provides a width constraint. If self.bounds.size.width is set, use it.
+        if (CGRectGetWidth(self.bounds) > 0) {
+            intrinsicMeasureWidth = CGRectGetWidth(self.bounds);
+        } else {
+            // If bounds width is not yet known and fillWidth is true, we have a dilemma.
+            // Option 1: Return UIViewNoIntrinsicMetric for width. This tells Auto Layout
+            // "I don't have an intrinsic width; you must constrain me." Height would be calculated
+            // based on a conceptual "infinite" width or a default width.
+            // Option 2: Calculate based on natural width (passing 0 for width).
+            // Let's try to return natural width if bounds aren't set, but still indicate fillWidth to MicroTeX.
+            // This makes `useFillWidthForIntrinsic = true` and `intrinsicMeasureWidth = 0.0f`.
+        }
+    } else {
+        // Not filling width, so calculate natural width.
+        useFillWidthForIntrinsic = false;
+    }
+
+    std::unique_ptr<microtex::Render> tempRender = [self createRenderObjectForWidth:intrinsicMeasureWidth useFillWidthFlag:useFillWidthForIntrinsic];
+
+    if (!tempRender) {
+        return CGSizeZero;
+    }
+    
+    CGFloat calculatedWidth = ceilf(tempRender->getWidth());
+    CGFloat calculatedHeight = ceilf(tempRender->getHeight());
+
+    if (self.fillWidth && intrinsicMeasureWidth == 0.0f && CGRectGetWidth(self.bounds) == 0.0f) {
+        // If we are filling width, but had to calculate based on natural width because no bounds were available,
+        // the width is not truly "intrinsic" in a fixed sense. It's "intrinsic IF unconstrained".
+        // For Auto Layout, this can be signaled by returning UIViewNoIntrinsicMetric for the width dimension.
+        // This means height depends on the width Auto Layout gives us.
+        // return CGSizeMake(UIViewNoIntrinsicMetric, calculatedHeight);
+        // However, for simplicity and if MicroTeX handles width=0 with fillWidth=true sensibly (e.g. natural width),
+        // returning the calculated natural width is often a practical approach.
+        // If this causes layout issues (e.g., view becomes too wide), then UIViewNoIntrinsicMetric is better for width.
+    }
+
+    return CGSizeMake(calculatedWidth, calculatedHeight);
 }
 
 @end
